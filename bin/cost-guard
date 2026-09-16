@@ -236,8 +236,7 @@ def _period_for(periods: List[Dict[str, Any]], when: date) -> Optional[Dict[str,
 
 
 def _derive_cache_rates(base_input: float) -> Dict[str, float]:
-    """Cache prices are documented MULTIPLIERS on base input, so they are derived rather than
-    stored. Only input and output need maintaining per model."""
+    """Derive default cache prices; model periods may override documented exceptions."""
     mult = (pricing().get("_metadata") or {}).get("cache_multipliers") or {}
     return {
         "cache_write_5m": base_input * float(mult.get("write_5m", 1.25)),
@@ -285,6 +284,8 @@ def model_rates(model_id: str, when: Optional[date] = None,
             out = {"input": base_in, "output": float(rates.get("output", 0.0)),
                    "priced_by": "model:%s" % key}
             out.update(_derive_cache_rates(base_in))
+            if "cache_read" in rates:
+                out["cache_read"] = float(rates["cache_read"])
             return out
 
     # Fallback: an id newer than this table. Deliberately the higher tier numbers — for a halt
@@ -351,6 +352,9 @@ def parse_transcript(
     p = Path(path)
     if not p.exists():
         return
+    # Content-block rows from one API response repeat the full usage object.
+    # Track all rows, including those before since_ts, so incremental reads stay deduplicated.
+    seen_messages = set()
     try:
         with p.open("r") as f:
             for line in f:
@@ -367,6 +371,11 @@ def parse_transcript(
                 usage = msg.get("usage") or {}
                 if not usage:
                     continue
+                message_id = msg.get("id") or entry.get("requestId")
+                if message_id:
+                    if message_id in seen_messages:
+                        continue
+                    seen_messages.add(message_id)
                 model = msg.get("model") or entry.get("model") or ""
                 ts_str = entry.get("timestamp") or ""
                 ts_epoch = _iso_to_epoch(ts_str) if ts_str else time.time()
@@ -430,10 +439,11 @@ def _ledger_dedupe_key(rec: Dict[str, Any]) -> Tuple[Any, ...]:
     but Claude Code's transcript timestamps include sub-millisecond precision
     so genuine collisions are vanishingly rare; double-appends are common.
     """
+    origin = {"seed": "main", "seed-sub": "sub"}.get(rec.get("origin"), rec.get("origin"))
     return (
         rec.get("ts"),
         rec.get("session_id"),
-        rec.get("origin"),
+        origin,
         rec.get("model"),
         round(float(rec.get("cost_usd") or 0.0), 6),
     )
@@ -1009,8 +1019,8 @@ def cmd_refresh_pricing(args: "argparse.Namespace") -> int:
     invoked by a hook. Without it `last_verified` is a comment nobody acts on, which is how the
     table drifted three months and 3.69x out of date.
 
-    Only base input and output are parsed. Cache rates are documented multipliers on base input
-    and are derived at read time, so there is nothing extra to keep in sync.
+    Base input, cache-read, and output prices are parsed from the model table. Cache reads that
+    differ from the documented default multiplier are stored as model-specific overrides.
     """
     import re as _re
     import urllib.request
@@ -1055,11 +1065,17 @@ def cmd_refresh_pricing(args: "argparse.Namespace") -> int:
         if not m:
             continue
         prices = [float(x) for x in _re.findall(r"\$([0-9.]+)\s*/\s*MTok", line)]
-        if len(prices) < 2:
+        # The main model table has input, 5m write, 1h write, cache read, and output.
+        # Requiring all five keeps later two-column batch-pricing rows out of this table.
+        if len(prices) < 5:
             continue
         key = "claude-%s-%s" % (m.group(1).lower(), m.group(2).replace(".", "-"))
-        # First price column is base input, last is output.
-        found.setdefault(key, {"name": name, "input": prices[0], "output": prices[-1]})
+        found.setdefault(key, {
+            "name": name,
+            "input": prices[0],
+            "cache_read": prices[3],
+            "output": prices[-1],
+        })
 
     if not found:
         print("parsed no pricing rows — the page layout changed. Table left untouched.",
@@ -1069,27 +1085,43 @@ def cmd_refresh_pricing(args: "argparse.Namespace") -> int:
 
     table = _read_json(PRICING_FILE, {}) or {}
     models = table.get("models", {}) or {}
-    changed, added, dated = [], [], []
+    meta = table.setdefault("_metadata", {})
+    multipliers = meta.get("cache_multipliers") or {}
+    cache_read_multiplier = float(multipliers.get("read", 0.1))
+    changed, added = [], []
+    today = datetime.now().date()
     for key, row in sorted(found.items()):
+        published = {"input": row["input"], "output": row["output"]}
+        if abs(row["cache_read"] - row["input"] * cache_read_multiplier) > 1e-9:
+            published["cache_read"] = row["cache_read"]
         entry = models.get(key)
         if entry is None:
-            models[key] = {"periods": [{"input": row["input"], "output": row["output"]}]}
+            models[key] = {"periods": [published]}
             added.append("%s  $%s/$%s" % (key, row["input"], row["output"]))
             continue
         periods = entry.get("periods") or []
-        if len(periods) != 1 or periods[0].get("from") or periods[0].get("to"):
-            # Dated pricing (e.g. an introductory period). Never flattened automatically —
-            # collapsing two periods into one silently reprices history.
-            dated.append(key)
+        active = _period_for(periods, today)
+        if active is None:
             continue
-        before = (periods[0].get("input"), periods[0].get("output"))
-        after = (row["input"], row["output"])
+        before = (active.get("input"), active.get("output"), active.get("cache_read"))
+        active.pop("cache_read", None)
+        active.update(published)
+        after = (active.get("input"), active.get("output"), active.get("cache_read"))
         if before != after:
-            periods[0]["input"], periods[0]["output"] = after
-            changed.append("%s  $%s/$%s -> $%s/$%s" % (key, before[0], before[1], *after))
+            if before[:2] == after[:2]:
+                changed.append("%s  cache read $%s -> $%s" % (key, before[2], after[2]))
+            else:
+                changed.append("%s  $%s/$%s -> $%s/$%s" %
+                               (key, before[0], before[1], after[0], after[1]))
+
+        # If a cancelled future price change made every period equivalent, remove the obsolete
+        # date boundary. Distinct historical periods remain untouched.
+        signatures = [(period.get("input"), period.get("output"),
+                       period.get("cache_read")) for period in periods]
+        if len(periods) > 1 and len(set(signatures)) == 1:
+            entry["periods"] = [published]
 
     table["models"] = models
-    meta = table.setdefault("_metadata", {})
     meta["last_verified"] = datetime.now().date().isoformat()
     meta["source"] = base
     PRICING_FILE.write_text(json.dumps(table, indent=2) + "\n", encoding="utf-8")
@@ -1098,8 +1130,6 @@ def cmd_refresh_pricing(args: "argparse.Namespace") -> int:
     for label, rows in (("changed", changed), ("added", added)):
         for row in rows:
             print("  %-8s %s" % (label, row))
-    for key in dated:
-        print("  SKIPPED  %s has dated periods — review by hand rather than flatten them" % key)
     if not changed and not added:
         print("  no rate changes")
     return 0

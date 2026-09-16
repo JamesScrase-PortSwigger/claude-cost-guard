@@ -78,9 +78,9 @@ class TestEffectiveDates(unittest.TestCase):
         r = rates("claude-sonnet-5", when=date(2026, 8, 31))
         self.assertEqual((r["input"], r["output"]), (2.0, 10.0))
 
-    def test_sonnet_5_standard_pricing_from_september(self):
+    def test_sonnet_5_launch_pricing_remains_from_september(self):
         r = rates("claude-sonnet-5", when=date(2026, 9, 1))
-        self.assertEqual((r["input"], r["output"]), (3.0, 15.0))
+        self.assertEqual((r["input"], r["output"]), (2.0, 10.0))
 
     def test_an_open_ended_period_covers_any_date(self):
         for when in (date(2026, 1, 1), date(2027, 6, 30)):
@@ -103,7 +103,7 @@ class TestFastMode(unittest.TestCase):
 
 
 class TestDerivedCacheRates(unittest.TestCase):
-    """Cache prices are documented multipliers on base input, so only input+output are stored."""
+    """Cache prices use default multipliers unless a model period stores an exception."""
 
     def test_multipliers_match_the_published_ratios(self):
         r = rates("claude-opus-5")

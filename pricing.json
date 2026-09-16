@@ -2,12 +2,12 @@
   "_metadata": {
     "schema": 2,
     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
-    "last_verified": "2026-07-27",
+    "last_verified": "2026-09-16",
     "max_age_days": 45,
     "unit": "USD per 1,000,000 tokens",
-    "_why_per_model": "Schema 1 priced by TIER, matching 'opus' as a substring of the model id. That was sound while every Opus release shared a price. It stopped being sound when Opus 4.1 ($15/$75) and Opus 5 ($5/$25) ended up in the same tier 3x apart \u2014 every Opus 5 session was costed at Opus 4.1 rates, so a halt guard configured for $10 fired at roughly $3.30 of real spend. Rates are now per model, with effective-date ranges, because pricing changes on dates (Sonnet 5 on 2026-09-01) and a report must price a session by ITS OWN date or every historical number silently changes overnight.",
+    "_why_per_model": "Schema 1 priced by TIER, matching 'opus' as a substring of the model id. That was sound while every Opus release shared a price. It stopped being sound when Opus 4.1 ($15/$75) and Opus 5 ($5/$25) ended up in the same tier 3x apart \u2014 every Opus 5 session was costed at Opus 4.1 rates, so a halt guard configured for $10 fired at roughly $3.30 of real spend. Rates are now per model, with optional effective-date ranges and cache-price overrides for model-specific exceptions.",
     "cache_multipliers": {
-      "_note": "Documented multipliers on base input, so only input+output need maintaining per model. Fewer numbers, fewer things to go stale.",
+      "_note": "Documented default multipliers on base input. Model periods may override documented exceptions.",
       "write_5m": 1.25,
       "write_1h": 2.0,
       "read": 0.1
@@ -102,15 +102,8 @@
     "claude-sonnet-5": {
       "periods": [
         {
-          "to": "2026-08-31",
           "input": 2.0,
-          "output": 10.0,
-          "_note": "introductory pricing"
-        },
-        {
-          "from": "2026-09-01",
-          "input": 3.0,
-          "output": 15.0
+          "output": 10.0
         }
       ]
     },
@@ -151,6 +144,24 @@
         {
           "input": 0.8,
           "output": 4.0
+        }
+      ]
+    },
+    "claude-fable-5-1": {
+      "periods": [
+        {
+          "input": 10.0,
+          "output": 50.0,
+          "cache_read": 0.25
+        }
+      ]
+    },
+    "claude-mythos-5-1": {
+      "periods": [
+        {
+          "input": 10.0,
+          "output": 50.0,
+          "cache_read": 0.25
         }
       ]
     }
